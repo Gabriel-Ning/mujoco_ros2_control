@@ -96,6 +96,16 @@ namespace mujoco_ros2_control
 #endif
 
         registerSensors();
+
+        // // Give controller manager time to fully initialize before starting simulation
+        // constexpr auto kControllerManagerInitWait = std::chrono::seconds(5);
+        // RCLCPP_INFO(nh_->get_logger(), "Waiting for controller manager to initialize for %ld seconds...", kControllerManagerInitWait.count());
+        // for (int i = 0; i < kControllerManagerInitWait.count(); ++i)
+        // {
+        //     RCLCPP_INFO(nh_->get_logger(), "[%d/%ld] Initializing controller manager...", i + 1, kControllerManagerInitWait.count());
+        //     rclcpp::sleep_for(std::chrono::seconds(1));
+        // }
+
         RCLCPP_INFO(nh_->get_logger(), "Sim environment setup complete");
     }
 
@@ -257,6 +267,9 @@ namespace mujoco_ros2_control
 
         for (auto &hw_info : control_hardware)
         {
+            RCLCPP_INFO(nh_->get_logger(), "** Loading hardware interface: %s **", hw_info.name.c_str());
+            RCLCPP_INFO(nh_->get_logger(), "**************************************");
+
             const std::string hardware_type = hw_info.hardware_class_type;
             auto system = std::unique_ptr<mujoco_ros2_control::MujocoSystemInterface>(robot_hw_sim_loader_->createUnmanagedInstance(hardware_type));
             system->initSim(mujoco_model_, mujoco_data_, hw_info, &urdf_model);
@@ -325,11 +338,17 @@ namespace mujoco_ros2_control
 
         // Give controller manager time to fully initialize before starting simulation
         constexpr auto kControllerManagerInitWait = std::chrono::seconds(5);
-        RCLCPP_INFO(nh_->get_logger(), "Waiting for controller manager to initialize for %ld seconds...", kControllerManagerInitWait.count());
-        for (int i = 0; i < kControllerManagerInitWait.count(); ++i)
+        RCLCPP_INFO(nh_->get_logger(), "Waiting up to %ld seconds for controller manager to initialize...", kControllerManagerInitWait.count());
+
+        auto start_time = nh_->now();
+        rclcpp::Rate rate(1); // 1 Hz spin rate
+        int seconds_waited = 0;
+        while ((nh_->now() - start_time) < rclcpp::Duration(kControllerManagerInitWait))
         {
-            RCLCPP_INFO(nh_->get_logger(), "[%d/%ld] Initializing controller manager...", i + 1, kControllerManagerInitWait.count());
-            rclcpp::sleep_for(std::chrono::seconds(1));
+            RCLCPP_INFO(nh_->get_logger(), "[%d/%ld] Initializing controller manager...", seconds_waited + 1, kControllerManagerInitWait.count());
+            rclcpp::spin_some(nh_);
+            rate.sleep();
+            ++seconds_waited;
         }
     }
 

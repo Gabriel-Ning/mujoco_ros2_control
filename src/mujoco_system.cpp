@@ -95,6 +95,11 @@ namespace mujoco_ros2_control
             }
         };
 
+        auto nearly_equal = [](double a, double b, double eps = 1e-6)
+        {
+            return std::fabs(a - b) < eps;
+        };
+
         name_ = hardware_info.name;
 
         RCLCPP_INFO(rclcpp::get_logger(hardware_info.name.c_str()), "Initializing Hardware Interface");
@@ -329,6 +334,7 @@ namespace mujoco_ros2_control
         for (int mujoco_actuator_id = 0; mujoco_actuator_id < mujoco_model_->nu; mujoco_actuator_id++)
         {
             std::string joint_name = mj_id2name(mujoco_model_, mjOBJ_JOINT, mujoco_model_->actuator_trnid[mujoco_actuator_id * 2]);
+
             if (joints_[joint_name].name.empty())
             {
                 continue;
@@ -343,31 +349,60 @@ namespace mujoco_ros2_control
             {
                 actuator_name = "actuator" + std::to_string(mujoco_actuator_id);
             }
+            RCLCPP_INFO(rclcpp::get_logger("actuators"), "----------------------------------------");
+            RCLCPP_INFO(rclcpp::get_logger("actuators"), "Registering actuator %s for joint %s", actuator_name.c_str(), joint_name.c_str());
 
             double *dynprm = &mujoco_model_->actuator_dynprm[mujoco_actuator_id * mjNDYN];
             double *gainprm = &mujoco_model_->actuator_gainprm[mujoco_actuator_id * mjNGAIN];
             double *biasprm = &mujoco_model_->actuator_biasprm[mujoco_actuator_id * mjNBIAS];
 
-            if (dynprm[0] == 1 && dynprm[1] == 0 && dynprm[2] == 0 &&
-                gainprm[0] == 1 && gainprm[1] == 0 && gainprm[2] == 0 &&
-                biasprm[0] == 0 && biasprm[1] == 0 && biasprm[2] == 0)
+            // Effort actuator
+            if (nearly_equal(dynprm[0], 1.0) && nearly_equal(gainprm[0], 1.0) &&
+                nearly_equal(biasprm[0], 0.0) && nearly_equal(biasprm[1], 0.0) && nearly_equal(biasprm[2], 0.0))
             {
-                joints_[joint_name].actuators.insert(std::pair<ControlMethod, int>(EFFORT, mujoco_actuator_id));
-                RCLCPP_INFO(rclcpp::get_logger(actuator_name), "added effort actuator for joint: %s", joints_[joint_name].name.c_str());
+                joints_[joint_name].actuators.insert({EFFORT, mujoco_actuator_id});
+                RCLCPP_INFO(rclcpp::get_logger(actuator_name),
+                            "Added EFFORT actuator for joint: %s", joints_[joint_name].name.c_str());
             }
-            else if (dynprm[0] == 1 && dynprm[1] == 0 && dynprm[2] == 0 &&
-                     gainprm[0] == -1 * biasprm[1] && gainprm[1] == 0 && gainprm[2] == 0 &&
-                     biasprm[0] == 0 && biasprm[2] == 0)
+            // Position actuator (old-style general)
+            else if (nearly_equal(dynprm[0], 1.0) &&
+                     nearly_equal(gainprm[0], -biasprm[1]) &&
+                     nearly_equal(biasprm[2], 0.0))
             {
-                joints_[joint_name].actuators.insert(std::pair<ControlMethod, int>(POSITION, mujoco_actuator_id));
-                RCLCPP_INFO(rclcpp::get_logger(actuator_name), "added position actuator for joint: %s", joints_[joint_name].name.c_str());
+                joints_[joint_name].actuators.insert({POSITION, mujoco_actuator_id});
+                RCLCPP_INFO(rclcpp::get_logger(actuator_name),
+                            "Added POSITION actuator (old-style general) for joint: %s [kp=%g]",
+                            joints_[joint_name].name.c_str(), biasprm[1]);
             }
-            else if (dynprm[0] == 1 && dynprm[1] == 0 && dynprm[2] == 0 &&
-                     gainprm[0] == -1 * biasprm[2] && gainprm[1] == 0 && gainprm[2] == 0 &&
-                     biasprm[0] == 0 && biasprm[1] == 0)
+            // Position actuator (new-style <position>)
+            else if (nearly_equal(dynprm[0], 1.0) &&
+                     gainprm[0] > 0.0 &&
+                     nearly_equal(biasprm[1], -gainprm[0]) &&
+                     biasprm[2] < 0.0)
             {
-                joints_[joint_name].actuators.insert(std::pair<ControlMethod, int>(VELOCITY, mujoco_actuator_id));
-                RCLCPP_INFO(rclcpp::get_logger(actuator_name), "added velocity actuator for joint: %s", joints_[joint_name].name.c_str());
+                joints_[joint_name].actuators.insert({POSITION, mujoco_actuator_id});
+                RCLCPP_INFO(rclcpp::get_logger(actuator_name),
+                            "Added POSITION actuator (kp/kv) for joint: %s [kp=%g, kv=%g]",
+                            joints_[joint_name].name.c_str(),
+                            gainprm[0], -biasprm[2]); // negate biasprm[2] to show positive kv
+            }
+            // Velocity actuator
+            else if (nearly_equal(dynprm[0], 1.0) &&
+                     nearly_equal(gainprm[0], -biasprm[2]))
+            {
+                joints_[joint_name].actuators.insert({VELOCITY, mujoco_actuator_id});
+                RCLCPP_INFO(rclcpp::get_logger(actuator_name),
+                            "Added VELOCITY actuator for joint: %s [kv=%g]",
+                            joints_[joint_name].name.c_str(), biasprm[2]);
+            }
+            else
+            {
+                RCLCPP_WARN(rclcpp::get_logger(actuator_name),
+                            "Unknown actuator type for joint: %s (dyn=%g,%g,%g gain=%g,%g,%g bias=%g,%g,%g)",
+                            joints_[joint_name].name.c_str(),
+                            dynprm[0], dynprm[1], dynprm[2],
+                            gainprm[0], gainprm[1], gainprm[2],
+                            biasprm[0], biasprm[1], biasprm[2]);
             }
         }
 
